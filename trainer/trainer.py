@@ -4,8 +4,9 @@ from torch.nn import functional as F
 from gpt import GPTLanguageModel
 from benchmarker import Benchmarker
 import os
+from datasets import load_dataset
 
-# hyperparameters
+# Hyperparameters
 batch_size = 64
 block_size = 256
 max_iters = 200
@@ -20,38 +21,60 @@ dropout = 0.2
 
 torch.manual_seed(1337)
 
-# wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-with open('input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
+# Load dataset from Hugging Face
+dataset = load_dataset("wikitext", "wikitext-103-v1", split='train')
 
-chars = sorted(list(set(text)))
+# Tokenizer
+chars = sorted(list(set(''.join(dataset['text']))))
 vocab_size = len(chars)
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s]
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for i, ch in enumerate(chars)}
+
+# Function to encode text and handle unknown characters
+def encode(s):
+    return [stoi[c] for c in s if c in stoi]
+
 decode = lambda l: ''.join([itos[i] for i in l])
 
-data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9*len(data))
-train_data = data[:n]
-val_data = data[n:]
+# Encode the dataset
+def encode_batch(batch):
+    encoded_texts = [encode(text) for text in batch['text'] if text]
+    return {'input_ids': encoded_texts}
 
-def get_batch(split):
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
+encoded_dataset = dataset.map(encode_batch, batched=True, remove_columns=['text'])
+
+# Create data loader
+def data_loader(split, batch_size):
+    split_data = encoded_dataset.train_test_split(test_size=0.1)
+    data = split_data['train'] if split == 'train' else split_data['test']
+
+    def collate_fn(examples):
+        examples = [ex for ex in examples if len(ex['input_ids']) <= block_size]
+
+        inputs = torch.full((len(examples), block_size), fill_value=0, dtype=torch.long)
+        labels = torch.full((len(examples), block_size), fill_value=0, dtype=torch.long)
+
+        for i, ex in enumerate(examples):
+            length = len(ex['input_ids'])
+            inputs[i, :length] = torch.tensor(ex['input_ids'][:block_size])
+            labels[i, :length-1] = torch.tensor(ex['input_ids'][1:block_size])
+
+        return inputs.to(device), labels.to(device)
+
+    return torch.utils.data.DataLoader(data, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
+
+train_loader = data_loader('train', batch_size)
+val_loader = data_loader('val', batch_size)
 
 @torch.no_grad()
 def estimate_loss():
     out = {}
     model.eval()
-    for split in ['train', 'val']:
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
+        for k, (X, Y) in enumerate(loader):
+            if k >= eval_iters:
+                break
             logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -60,7 +83,7 @@ def estimate_loss():
 
 model = GPTLanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device)
 m = model.to(device)
-print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+print(sum(p.numel() for p in m.parameters()) / 1e6, 'M parameters')
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -80,17 +103,16 @@ try:
             losses = estimate_loss()
             print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-        xb, yb = get_batch('train')
+        for xb, yb in train_loader:
+            logits, loss = model(xb, yb)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
 
-        logits, loss = model(xb, yb)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+            # Update the current loss in the benchmarker
+            benchmarker.update_loss(loss.item())
 
-        # Update the current loss in the benchmarker
-        benchmarker.update_loss(loss.item())
-
-    # generate from the model
+    # Generate from the model
     context = torch.zeros((1, 1), dtype=torch.long, device=device)
     print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 
