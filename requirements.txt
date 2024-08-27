@@ -1,0 +1,8 @@
+datasets==2.20.0
+GPUtil==1.4.0
+GPUtil==1.4.0
+matplotlib==3.6.1
+pandas==1.5.1
+psutil==5.9.3
+torch==2.0.1+cpu
+torchprofile==0.0.4
