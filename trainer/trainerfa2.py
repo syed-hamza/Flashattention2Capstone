@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-# from gpt import GPTLanguageModel
 from gptfa2 import GPTLanguageModel
 from benchmarker import Benchmarker
 import os
@@ -60,12 +59,27 @@ def data_loader(split, batch_size):
             inputs[i, :length] = torch.tensor(ex['input_ids'][:block_size])
             labels[i, :length-1] = torch.tensor(ex['input_ids'][1:block_size])
 
-        return inputs.to(device), labels.to(device)
+        return inputs.to(device).half(), labels.to(device).long()
 
     return torch.utils.data.DataLoader(data, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
 
 train_loader = data_loader('train', batch_size)
 val_loader = data_loader('val', batch_size)
+
+# @torch.no_grad()
+# def estimate_loss():
+#     out = {}
+#     model.eval()
+#     for split, loader in [('train', train_loader), ('val', val_loader)]:
+#         losses = torch.zeros(eval_iters)
+#         for k, (X, Y) in enumerate(loader):
+#             if k >= eval_iters:
+#                 break
+#             logits, loss = model(X, Y)
+#             losses[k] = loss.item()
+#         out[split] = losses.mean()
+#     model.train()
+#     return out
 
 @torch.no_grad()
 def estimate_loss():
@@ -77,13 +91,13 @@ def estimate_loss():
             if k >= eval_iters:
                 break
             logits, loss = model(X, Y)
-            losses[k] = loss.item()
+            losses[k] = loss.item()  # No need to cast, just get the item
         out[split] = losses.mean()
     model.train()
     return out
 
 model = GPTLanguageModel(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device)
-m = model.to(device)
+m = model.half().to(device)
 print(sum(p.numel() for p in m.parameters()) / 1e6, 'M parameters')
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -97,12 +111,23 @@ benchmarker = Benchmarker(os.path.join(output_dir, 'gpt_benchmark.csv'))
 
 # Start benchmarking
 benchmarker.start()
+# scaler = torch.cuda.amp.GradScaler()
 
 try:
     for iter in range(max_iters):
         if iter % eval_interval == 0 or iter == max_iters - 1:
             losses = estimate_loss()
             print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+        # for xb, yb in train_loader:
+        #     with torch.cuda.amp.autocast():
+        #         logits, loss = model(xb, yb)
+            
+        #     optimizer.zero_grad(set_to_none=True)
+        #     # Use loss as is, without casting
+        #     scaler.scale(loss).backward()
+        #     scaler.step(optimizer)
+        #     scaler.update()
 
         for xb, yb in train_loader:
             logits, loss = model(xb, yb)
@@ -114,7 +139,7 @@ try:
             benchmarker.update_loss(loss.item())
 
     # Generate from the model
-    context = torch.zeros((1, 1), dtype=torch.long, device=device)
+    context = torch.zeros((1, 1), dtype=torch.long, device=device).half()
     print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 
 finally:
