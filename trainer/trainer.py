@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 # from gpt import GPTLanguageModel
-from gptfa2 import GPTLanguageModel
+from gpt import GPTLanguageModel
 from benchmarker import Benchmarker
 import os
 from datasets import load_dataset
